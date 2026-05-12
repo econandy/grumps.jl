@@ -1412,3 +1412,329 @@ State of play for picking up in WSL Claude Code CLI:
 - **Plan:** Phase 1 BLP baseline on US Treasuries → Phase 2 global → Phase 3 pure characteristics → Phase 4 QT/QE counterfactuals.
 
 **Next concrete step:** prototype Phase 1 in JAX on laptop CPU with synthetic data. Start with 20 bonds × 100 days × $R$=1000 grid points; validate that estimator recovers a known $F$ on three test problems (Gaussian, bimodal, point mass). Then add IV / outer GMM, FEs, elastic net. Then move to a workstation with real US Treasury data for the actual Phase 1 run.
+
+---
+
+# Continuation: 2026-05-10 (after restart of bond-demand discussion)
+
+This section continues the conversation after the previous pickup state. Key methodological evolution: scope refined to US Treasuries only with rich data infrastructure (SOMA, foreign CB, TIC SHL, Z.1), and methodology revised from PC-FKRB to mixed logit + IFE as the pragmatic recommendation.
+
+## Major topics covered in continuation
+
+### 1. pyBLP feature confirmation
+- pyBLP supports nested logit + random coefficients + micro moments + FEs **simultaneously**
+- `Problem.solve()` accepts `rho`, `sigma`, `pi`, `micro_moments` all in one call
+- pyBLP supports normal, log-normal, triangular distributions for random coefficients
+- Custom distributions via agent_data simulation
+- FE absorption via PyHDFE (`absorb=` argument) handles thousands of FE blocks
+- pyBLP does NOT support interactive fixed effects natively (would require MSW custom code)
+
+### 2. Project scope refinement: US Treasuries focus
+
+Decision: focus on US Treasuries only (drop global sovereigns for v1).
+
+**Rationale:**
+- Clean identification (single issuer, single currency)
+- Standard data sources, all public/free
+- Closer to KKMY 2021 framework but for US Treasury market
+- 3-5 month timeline vs. 6-12 months for global
+- Strong contribution: structural demand system for US Treasuries with rich investor data
+
+**Data sources for US Treasuries project:**
+- **CRSP TFZ daily:** YTM (TDYLD), prices, characteristics, outstanding amounts
+- **SOMA H.4.1 (weekly) or Open Market Operations (daily):** Fed holdings per CUSIP
+- **TIC SHL (annual June 30):** Foreign holdings by country × CUSIP
+- **TIC SLT (monthly):** Foreign holdings aggregate by country × broad-bucket
+- **Z.1 quarterly:** Domestic sectoral holdings (banks, pension, insurance, MFs, etc.)
+- **Foreign CB daily (if available):** by country, sharpens identification substantially
+
+### 3. CME deliverable baskets as nests (initial proposal)
+
+Initially proposed CME CTD baskets as nest structure for nested logit:
+- TU (2y), 3Y, FV (5y), TY (10y), TN (Ultra 10y), US (30y), UB (Ultra 30y)
+- Bills as separate nest or outside option
+- Time-varying basket membership (bonds age in/out)
+- Economic justification: futures arbitrage forces near-substitutability within basket
+
+**Issue identified:** Within-basket near-perfect substitution implies $\rho_g \to 0$:
+- Numerical instability of QP at boundary
+- Random coefficients on duration become collinear with nest definition
+- Within-basket individual bond demand poorly identified
+
+**Resolution:** Aggregate to basket × OTR/off-OTR products. Or use hierarchical nesting with OTR/off-OTR as sub-nest.
+
+### 4. Cross-nest elasticities and IIA concerns
+
+In standard RCNL, $\rho_g$ is homogeneous (not random across investors). Cross-nest substitution heterogeneity comes from random coefficients on observable characteristics.
+
+**Specific concern for CTD basket nests:** Natural cross-nest characteristic (duration) is collinear with nest definition. Lose ability to capture heterogeneous cross-nest substitution.
+
+**Fixes:**
+1. Hierarchical nesting with multiple $\rho$ levels
+2. Random coefficients on non-nest-defining characteristics (OTR, coupon, age)
+3. Preferred-habitat parameterization with random $\mu, \gamma$ on $(d - \mu)^2$
+
+### 5. Frequency choices
+
+**Daily macro is computationally expensive** (~5x slower than weekly) without proportional identification gain for habitat estimation. Most identification is at weekly+ frequencies.
+
+**Recommended: weekly demand system primary, daily for event studies.**
+
+This is standard practice (KKMY uses quarterly; KY uses quarterly).
+
+### 6. Daily SOMA holdings
+- Available from Fed Open Market Operations data
+- Doesn't fundamentally change daily-vs-weekly demand system tradeoff
+- Best used as: (a) IV at appropriate aggregation, (b) event studies, (c) counterfactual specification
+
+### 7. Daily foreign CB holdings
+- More valuable than daily SOMA — adds cross-investor variation
+- Three versions: aggregate (A), by country (B), by country × CUSIP (C)
+- Version B or C with daily resolution **could justify daily demand system** if paper specifically about foreign CB demand
+- For general habitat estimation: weekly demand system + daily CB micro moments aggregated to weekly + daily CB event studies
+
+### 8. Interactive fixed effects (MSW 2018) for unbalanced panel
+
+**MSW structure:** $\xi_{j,t} = \lambda_j' f_t + e_{j,t}$ with $r$-dimensional factors.
+
+For Treasuries: $r = 3$ matches Litterman-Scheinkman (level, slope, curvature).
+
+**Unbalanced panel:** MSW formal theory is balanced; unbalanced extension via EM imputation is well-established (Bai 2003, Stock-Watson 2002, Su-Wang 2017). Algorithm:
+1. Initialize from yield-curve PCA
+2. Iterate: impute missing entries via current factor estimate → SVD on filled matrix → re-estimate β, α on observed data
+3. Converges in 10-30 iterations with smart initialization
+
+**Threshold inclusion:** drop bonds with <13 weeks observation.
+
+### 9. Persistence in delta
+
+For weekly/monthly data with rich FEs, residual persistence after time FE projection is typically modest.
+
+**Options:**
+1. Aggregate to monthly + FEs (handles most persistence mechanically)
+2. Lagged δ in Stage B (1 week + 4 week + 22 day lags for daily; 1 + 4 for weekly)
+3. Arellano-Bond NOT NEEDED at large T (Nickell bias trivial)
+4. Standard 2SLS with predetermined lags as IVs
+
+**Recommendation:** lagged δ in linear stage; HAC SEs with appropriate bandwidth; cluster by (basket, year).
+
+### 10. Methodology evolution: PC-FKRB vs Mixed logit + IFE
+
+**User's actual goals (clarified):**
+1. Flexible and realistic environment for counterfactuals
+2. Methodological contribution from cutting-edge IO tools
+
+**PC-FKRB advantages:**
+- Nonparametric distribution of heterogeneity F (substantively important)
+- No T1EV smoothing artifacts at large J
+- Cutting-edge IO methodology
+- OT-dual structure theoretically appealing
+
+**PC-FKRB costs:**
+- Argmax operations are computationally expensive (~5-10x slower than mixed logit)
+- Custom JAX implementation (~4,800-6,400 lines code)
+- No consistency proof for exact combination
+- Methodological risk
+
+**Mixed logit + IFE alternative:**
+- ~80% of PC-FKRB substantive content
+- 5-10x faster
+- pyBLP support + MSW custom extension
+- Still genuinely novel for finance (MSW IFE in asset demand systems)
+- 4-6 months vs. 6-9 months
+- $3-8K compute vs. $10-25K
+
+**Final recommendation:** Mixed logit + IFE + rich random coefficients + multi-frequency micro moments via pyBLP + MSW subclass. Capture 80% of substantive value at much lower cost.
+
+For methodological contribution from cutting-edge IO: combination of MSW IFE + multi-frequency joint GMM + daily SOMA + foreign CB micro moments applied to US Treasury demand is genuinely novel for finance.
+
+### 11. Coupon rate handling
+
+**Issue:** Coupon payments mechanically affect price but coupon rate is fixed.
+
+**Solution:** Use **YTM (yield-to-maturity), not price**, as the "price" variable in demand. YTM accounts for cash flow schedule structurally; no mechanical drops at coupon dates.
+
+**Coupon rate as characteristic:** Include in X. Random coefficient captures preference for high-coupon vs. low-coupon bonds (tax effects, reinvestment risk, duration/convexity, CTD economics).
+
+**Identification of coupon coefficient:** Requires NOT using bond/security FEs (which would absorb it).
+
+**Recommended FE structure:**
+- Time FE (1,300 weekly dummies)
+- Basket FE (7-8 CTD baskets) 
+- Basket × time FE
+- NO security/bond FE (lose coupon, currency, etc. identification)
+
+### 12. CRSP US Treasury data
+
+**CRSP TFZ provides YTM directly** in `TDYLD` field. No computation needed.
+
+Key fields:
+- `TDYLD`: YTM
+- `TDPRC`: Clean price
+- `TDPDINT`: Dirty price (includes accrued interest)
+- `TDPUBOUT`: Coupon rate
+- `TDOUTPRN`: Outstanding amount (par)
+- `TDMATDT`: Maturity date
+- `TDDURATN`: Modified duration
+
+**Standard workflow:**
+1. Pull TFZ_DLY (daily) and TFZ_ISS (issuance) from CRSP via WRDS
+2. Resample to weekly (end-of-week or value-weighted)
+3. Compute residual maturity from `TDMATDT - caldt`
+4. Assign CTD basket membership
+5. Compute on-the-run dummy from issuance dates
+6. Merge with SOMA holdings (daily aggregated to weekly)
+7. Compute par-value-based shares: `outstanding / total_outstanding`
+
+### 13. Extending to all securities (v2 / future)
+
+**Methodology generalizes naturally** to all securities (US equities + Treasuries + corporate bonds + agencies).
+
+**Scope expansion:**
+- J grows from ~1,000 (Treasuries) to ~20,000-30,000 (all US securities)
+- Asset-class × characteristic interactions needed
+- Hierarchical nest structure (stocks vs. bonds at top)
+- Different data sources (CRSP equity, TRACE corporate, 13F holdings)
+
+**Computational cost:** 3-5x slower than Treasury-only.
+
+**Recommendation:** Sequential approach
+- v1 (6 months): Treasuries with PC-FKRB or mixed logit + IFE
+- v2 (6 more months): Extended to all US securities
+- v3 (optional): International extension
+
+## Final recommended specification for US Treasury demand v1
+
+```python
+import pyblp
+
+# Custom subclass for MSW interactive fixed effects
+class MSWProblem(pyblp.Problem):
+    def __init__(self, n_factors=3, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.n_factors = n_factors
+    
+    def _stage_b_with_ife(self, delta_hat, X, y, Z, mask):
+        # MSW iterative ILS + PCA for unbalanced panel
+        return msw_unbalanced_ife(delta_hat, X, y, Z, mask, 
+                                    n_factors=self.n_factors)
+
+# Build problem
+product_formulations = (
+    pyblp.Formulation(
+        '1 + I(yield) + maturity + coupon_rate + on_the_run + age + log_issue_size',
+        absorb='C(time_id) + C(basket_id) + C(basket_id):C(time_id)'
+    ),
+    pyblp.Formulation('0 + I(yield) + on_the_run + age + coupon_rate'),
+)
+
+agent_formulation = pyblp.Formulation(
+    '0 + sector_bank + sector_pension + sector_insurance + sector_mf + sector_foreign'
+)
+
+problem = MSWProblem(
+    product_formulations=product_formulations,
+    product_data=weekly_treasury_df,
+    agent_formulation=agent_formulation,
+    agent_data=agent_df,
+    integration=pyblp.Integration('halton', size=10000),
+    rc_types=['log', 'linear', 'linear', 'linear'],
+    nesting_ids='basket_id_nest',  # CME basket nests
+    n_factors=3,  # MSW IFE
+)
+
+# Define micro moments
+tic_moments = build_tic_shl_moments(...)
+z1_moments = build_z1_quarterly_moments(...)
+cb_moments = build_foreign_cb_weekly_moments(...)
+
+# Solve
+results = problem.solve(
+    sigma=initial_sigma,
+    pi=initial_pi,
+    rho=initial_rho,
+    rho_bounds=(0.05, 0.95),
+    micro_moments=tic_moments + z1_moments + cb_moments,
+    optimization=pyblp.Optimization('l-bfgs-b'),
+    iteration=pyblp.Iteration('squarem'),
+    W_type='clustered',
+    se_type='clustered',
+    fp_type='safe_linear',
+)
+```
+
+## Phased implementation plan (5-month version)
+
+**Month 1:** pyBLP + MSW IFE prototype on synthetic data
+- Subclass pyBLP with IFE Path 2
+- Test on synthetic data with known F and factor structure
+- Validate consistency
+
+**Month 2:** Data infrastructure
+- CRSP TFZ panel construction (weekly)
+- SOMA daily → weekly aggregation
+- TIC SHL annual processing
+- Z.1 quarterly processing
+- CME CTD basket time series
+- Reconciliation: SOMA + TIC + Z.1 + private = total outstanding
+
+**Month 3:** Full estimation on Treasury data
+- Initial estimation with all data
+- Convergence diagnostics
+- Sensitivity analysis (frequency, FE structure, IV strategy)
+
+**Month 4:** Counterfactuals + inference
+- QT pass-through across baskets
+- Foreign CB demand shocks (China, BOJ, Saudi, etc.)
+- Treasury supply composition changes
+- Block bootstrap for SEs (~$2-5K compute on cluster)
+
+**Month 5:** Robustness, writing, polish
+- Robustness specifications
+- Validation against KKMY-style baseline
+- Paper draft
+
+**Total compute: $3-8K cloud spend over 5 months.**
+
+## Open questions to revisit
+
+1. Whether to use PC-FKRB as v1 or save for v2 methods paper (currently leaning v2)
+2. Frequency: weekly primary, daily for events
+3. Whether to use CMNS UBO restatement (currently: not for v1, use raw TIC for major countries)
+4. Bucket-level aggregation vs. CUSIP-level (likely bucket for v1)
+5. Investor segments via Z.1: how granular (banks/pension/insurance/MF/foreign, or finer)
+
+## Next concrete steps
+
+1. **Get CRSP TFZ access via WRDS** (already have institutional access)
+2. **Apply for CUSIP-level TIC SHL access** (may need Treasury Department special data agreement)
+3. **Start building weekly Treasury panel** (Phase 2 of plan)
+4. **Prototype pyBLP RCNL on subset** (1-2 year window first) to validate spec
+5. **Add MSW IFE subclass** once base spec works
+
+## Key references
+
+**Methodology:**
+- Berry, Levinsohn, Pakes (1995, Econometrica) — BLP
+- Berry, Levinsohn, Pakes (2004, JPE) — BLP with micro+macro data
+- Petrin (2002, JPE) — Minivan demand with CEX micro moments
+- Brenkers & Verboven (2006) — RCNL
+- Fox, Kim, Ryan, Bajari (2011, QE) — FKRB nonparametric mixtures
+- Heiss, Hetzenecker, Osterhaus (2022, JoE) — FKRB elastic net
+- Berry, Pakes (2007, IER) — Pure characteristics
+- Moon, Shum, Weidner (2018, JoE) — Interactive fixed effects
+- Bai (2003, JASA) — Factor models with missing data
+- Conlon, Gortmaker (2020, RAND) — pyBLP
+
+**Finance demand systems:**
+- Koijen, Yogo (2019, JPE) — Demand system asset pricing
+- Koijen, Koulischer, Mojon, Yogo (2021, JF) — QE in euro area
+- Bretscher, Schmid, Sen, Sharma (2024, RFS) — Corporate bonds
+- Vayanos, Vila (2021, Econometrica) — Preferred habitat
+- Gandhi, Houde (2019) — Differentiation IVs
+
+**Data:**
+- Coppola, Maggiori, Neiman, Schreger (2021, QJE) — UBO restatement
+- Du, Tepper, Verdelhan (2018, JF) — Cross-currency basis
+- Fleckenstein, Longstaff — Treasury supply effects
+
